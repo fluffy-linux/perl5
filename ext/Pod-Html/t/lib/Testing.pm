@@ -572,7 +572,7 @@ sub _process_diff {
     }
     die("process_diff() arguments missing: @keys_missing") if @keys_missing;
 
-    my $diff = '/bin/diff';
+    my $diff = '/sw/diffutils/bin/diff';
     -x $diff or $diff = '/usr/bin/diff';
     -x $diff or $diff = undef;
     my $diffopt = $diff ? $^O =~ m/(linux|darwin)/ ? '-u' : '-c'
