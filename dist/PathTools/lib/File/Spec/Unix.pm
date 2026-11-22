@@ -251,11 +251,194 @@ Takes no argument, returns the environment variable PATH as an array.
 
 =cut
 
+sub _split_colon_path {
+    my ($s) = @_;
+    return split(':', $s, -1) if index($s, '[') < 0;
+    my @res;
+    my $n = length($s);
+    my $seg_start = 0;
+    my $i = 0;
+    while ($i < $n) {
+        my $ch = substr($s, $i, 1);
+        if ($ch eq ':') {
+            push @res, substr($s, $seg_start, $i - $seg_start);
+            $seg_start = $i + 1;
+            $i++;
+        } elsif ($ch eq '[') {
+            my $j = $i + 1;
+            if ($j < $n) {
+                my $c1 = substr($s, $j, 1);
+                $j++ if $c1 eq '!' || $c1 eq '^';
+            }
+            $j++ if $j < $n && substr($s, $j, 1) eq ']';
+            while ($j < $n) {
+                my $cj = substr($s, $j, 1);
+                last if $cj eq ']' || $cj eq '/';
+                if ($cj eq '[' && $j + 1 < $n) {
+                    my $kind = substr($s, $j + 1, 1);
+                    if ($kind eq ':' || $kind eq '.' || $kind eq '=') {
+                        my $k = index($s, $kind . ']', $j + 2);
+                        if ($k >= 0) {
+                            my $sub = substr($s, $j + 2, $k - ($j + 2));
+                            if (index($sub, '/') < 0 && ($kind eq '.' || index($sub, ']') < 0)) {
+                                $j = $k + 2;
+                                next;
+                            }
+                        }
+                    }
+                }
+                $j++;
+            }
+            if ($j < $n && substr($s, $j, 1) eq ']') {
+                $i = $j + 1;
+            } else {
+                $i++;
+            }
+        } else {
+            $i++;
+        }
+    }
+    push @res, substr($s, $seg_start, $n - $seg_start);
+    return @res;
+}
+
+sub _pp_seg_to_re {
+    my ($seg) = @_;
+    my $re = '';
+    my $len = length($seg);
+    my $i = 0;
+    while ($i < $len) {
+        my $c = substr($seg, $i, 1);
+        if ($c eq '*') {
+            $re .= '.*';
+            $i++;
+        } elsif ($c eq '?') {
+            $re .= '.';
+            $i++;
+        } elsif ($c eq '[') {
+            my $j = $i + 1;
+            my $neg = '';
+            if ($j < $len) {
+                my $nc = substr($seg, $j, 1);
+                if ($nc eq '!' || $nc eq '^') {
+                    $neg = '^';
+                    $j++;
+                }
+            }
+            my $scan = $j;
+            $scan++ if $scan < $len && substr($seg, $scan, 1) eq ']';
+            while ($scan < $len && substr($seg, $scan, 1) ne ']') {
+                if (substr($seg, $scan, 1) eq '[' && $scan + 1 < $len) {
+                    my $kind = substr($seg, $scan + 1, 1);
+                    if ($kind eq ':' || $kind eq '.' || $kind eq '=') {
+                        my $k = index($seg, $kind . ']', $scan + 2);
+                        if ($k >= 0 && ($kind eq '.' || index(substr($seg, $scan + 2, $k - ($scan + 2)), ']') < 0)) {
+                            $scan = $k + 2;
+                            next;
+                        }
+                    }
+                }
+                $scan++;
+            }
+            if ($j < $len && $scan < $len && substr($seg, $scan, 1) eq ']') {
+                my $body = substr($seg, $j, $scan - $j);
+                $body =~ s/\\/\\\\/g;
+                $body =~ s/\A\]/\\]/;
+                $body =~ s/\A\^/\\^/ unless length($neg);
+                $re .= '[' . $neg . $body . ']';
+                $i = $scan + 1;
+            } else {
+                $re .= '\\[';
+                $i++;
+            }
+        } else {
+            $re .= quotemeta($c);
+            $i++;
+        }
+    }
+    local ($@, $SIG{__DIE__}, $SIG{__WARN__});
+    return eval { no warnings; qr/\A(?:$re)\z/s };
+}
+
+sub _pp_glob_dirs {
+    my ($pat) = @_;
+    my $has_trailing_slash = ($pat =~ m{/\z});
+    my $prefix = ($pat =~ s{\A/+}{}) ? '/' : '';
+    $pat =~ s{/+\z}{};
+    return (-d '/' ? ('/') : ()) if $prefix eq '/' && $pat eq '';
+    my @segs = split(m{/+}, $pat);
+    my @bases = ($prefix);
+    for my $seg (@segs) {
+        my @next;
+        if ($seg !~ /[*?\[]/) {
+            for my $b (@bases) {
+                my $cand = $b eq '' ? $seg : $b eq '/' ? "/$seg" : "$b/$seg";
+                push @next, $cand if -e $cand;
+            }
+        } else {
+            my $re = _pp_seg_to_re($seg);
+            if (!defined $re) {
+                @bases = ();
+                last;
+            }
+            my $want_dot = (substr($seg, 0, 1) eq '.');
+            for my $b (@bases) {
+                my $open_dir = $b eq '' ? '.' : $b;
+                opendir(my $dh, $open_dir) or next;
+                my @ents = sort grep {
+                    ($want_dot || substr($_, 0, 1) ne '.') && $_ =~ $re
+                } readdir($dh);
+                closedir($dh);
+                for my $e (@ents) {
+                    next if ($e eq '.' || $e eq '..') && $e ne $seg;
+                    push @next, ($b eq '' ? $e : $b eq '/' ? "/$e" : "$b/$e");
+                }
+            }
+        }
+        @bases = @next;
+        last unless @bases;
+    }
+    @bases = grep { -d $_ } @bases;
+    if ($has_trailing_slash) {
+        $_ .= '/' for grep { !m{/\z} } @bases;
+    }
+    return @bases;
+}
+
 sub path {
     return () unless exists $ENV{PATH};
-    my @path = split(':', $ENV{PATH}, -1);
+    my @path = _split_colon_path($ENV{PATH});
     foreach (@path) { $_ = '.' if $_ eq '' }
-    return @path;
+    return @path unless $ENV{PATH} =~ /[*?\[]/;
+
+    my $have_fg = defined(&File::Glob::bsd_glob);
+    if (!$have_fg) {
+        local ($@, $SIG{__DIE__});
+        $have_fg = eval { require File::Glob; defined(&File::Glob::bsd_glob) };
+    }
+    my @out;
+    for my $entry (@path) {
+        if ($entry !~ /[*?\[]/) {
+            push @out, $entry;
+        } else {
+            my @matches;
+            if ($have_fg && $entry !~ /\[[:.=]|\[\^/) {
+                my $has_slash = ($entry =~ m{/\z});
+                @matches = File::Glob::bsd_glob($has_slash ? $entry : "$entry/", 0);
+                if (!$has_slash) {
+                    s{/\z}{} for @matches;
+                }
+            } else {
+                @matches = _pp_glob_dirs($entry);
+            }
+            if (@matches) {
+                push @out, @matches;
+            } elsif (-d $entry) {
+                push @out, $entry;
+            }
+        }
+    }
+    return @out;
 }
 
 =item join

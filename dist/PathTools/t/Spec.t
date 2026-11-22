@@ -877,4 +877,82 @@ for ( @path_tests ) {
   is $got, $expected, $function . " with PATH=$path";
 }
 
+if ($^O ne 'MSWin32' && $^O ne 'VMS') {
+  require File::Temp;
+  my $td = File::Temp::tempdir(CLEANUP => 1);
+  mkdir "$td/alpha" or die $!;
+  mkdir "$td/alpha/bin" or die $!;
+  mkdir "$td/beta" or die $!;
+  mkdir "$td/beta/bin" or die $!;
+  open my $f, '>', "$td/notadir.squashfs" or die $!;
+  close $f;
+
+  {
+    local $ENV{PATH} = ":$td/*/bin:$td/[a]lpha/bin:$td/missing/*/bin";
+    my $die_called = 0;
+    local $SIG{__DIE__} = sub { $die_called++ };
+    $@ = 'sentinel_eval_error';
+    my @got = File::Spec::Unix->path();
+    is($@, 'sentinel_eval_error', 'File::Spec::Unix->path() preserves $@');
+    is($die_called, 0, 'File::Spec::Unix->path() does not trigger outer $SIG{__DIE__}');
+    is_deeply(\@got, ['.', "$td/alpha/bin", "$td/beta/bin", "$td/alpha/bin"],
+              'File::Spec::Unix->path() expands wildcards and preserves empty segments as "."');
+
+    open my $tf, '>', "$td/alpha/bin/fluffy_cmd_probe" or die $!;
+    close $tf;
+    chmod 0755, "$td/alpha/bin/fluffy_cmd_probe" or die $!;
+    if (eval { require IPC::Cmd; 1 }) {
+      is(IPC::Cmd::can_run('fluffy_cmd_probe'), "$td/alpha/bin/fluffy_cmd_probe",
+         'IPC::Cmd::can_run resolves executable through wildcard PATH');
+    }
+  }
+
+  {
+    my @pp = File::Spec::Unix::_pp_glob_dirs("$td/*/bin");
+    is_deeply(\@pp, ["$td/alpha/bin", "$td/beta/bin"],
+              'miniperl pure-Perl _pp_glob_dirs fallback matches XS path expansion');
+    my @pp_all = File::Spec::Unix::_pp_glob_dirs("$td/*");
+    is_deeply(\@pp_all, ["$td/alpha", "$td/beta"],
+              '_pp_glob_dirs excludes regular files like .squashfs');
+
+    mkdir "$td/1:dir" or die $!;
+    mkdir "$td/1:dir/bin" or die $!;
+    mkdir "$td/[unclosed" or die $!;
+    mkdir "$td/[unclosed/sub" or die $!;
+    mkdir "$td/lit[z-a]" or die $!;
+    mkdir "$td/lit[z-a]/bin" or die $!;
+    my $die_called = 0;
+    my $warn_called = 0;
+    local $SIG{__DIE__} = sub { $die_called++ };
+    local $SIG{__WARN__} = sub { $warn_called++ };
+    $@ = 'keep_eval_err';
+    for my $bad ("$td/[[:bogus:]]*/bin", "$td/[[:nohit:]*/bin", "$td/[[.ch.]]*/bin", "$td/[[=a=]]*/bin", "$td/[z-a]*/bin") {
+      my @res = File::Spec::Unix::_pp_glob_dirs($bad);
+      is_deeply(\@res, [], "_pp_glob_dirs cleanly handles $bad without dying");
+    }
+    is_deeply([File::Spec::Unix::_pp_glob_dirs("$td/[[:alpha:]]*/bin")],
+              ["$td/alpha/bin", "$td/beta/bin", "$td/lit[z-a]/bin"],
+              '_pp_glob_dirs supports POSIX [[:alpha:]] character classes');
+    is_deeply([File::Spec::Unix::_pp_glob_dirs("$td/?eta/bin/")], ["$td/beta/bin/"],
+              '_pp_glob_dirs: ? matches one character, and a trailing slash is kept');
+    is_deeply([File::Spec::Unix::_pp_glob_dirs("$td/[!a]eta/bin")], ["$td/beta/bin"],
+              '_pp_glob_dirs: [!a] negates');
+    is_deeply([File::Spec::Unix::_pp_glob_dirs("$td/[^b]lpha/bin")], ["$td/alpha/bin"],
+              '_pp_glob_dirs: [^b] negates');
+    {
+      local $ENV{PATH} = "$td/[unclosed/sub:$td/1[x:]dir/bin:$td/[[:alpha:]]*/bin";
+      is_deeply([File::Spec::Unix->path()],
+                ["$td/[unclosed/sub", "$td/1:dir/bin", "$td/alpha/bin", "$td/beta/bin", "$td/lit[z-a]/bin"],
+                'path() splits colons with single-component bracket awareness and supports [[:alpha:]]');
+    }
+    local $ENV{PATH} = "$td/[[.ch.]]*/bin:$td/[z-a]*/bin:$td/lit[z-a]/bin";
+    my @bad_path = File::Spec::Unix->path();
+    is_deeply(\@bad_path, ["$td/lit[z-a]/bin"],
+              'path() survives malformed/reversed brackets and preserves existing literal [z-a] dir');
+    is($@, 'keep_eval_err', '_pp_glob_dirs and path() preserve $@ on malformed brackets');
+    is($die_called, 0, '_pp_glob_dirs does not fire $SIG{__DIE__}');
+    is($warn_called, 0, '_pp_glob_dirs does not fire $SIG{__WARN__}');
+  }
+}
+
 done_testing();
