@@ -49,7 +49,7 @@ die $usage if $opts{help};
 $opts{destdir} //= '';
 
 foreach my $pre (qw(man1 man3)) {
-    $opts{"${pre}dir"} //= $opts{destdir} . $Config{"install${pre}dir"};
+    $opts{"${pre}dir"} //= length($Config{"install${pre}dir"}) ? $opts{destdir} . $Config{"install${pre}dir"} : "";
     $opts{"${pre}ext"} //= $Config{"${pre}ext"};
 }
 $opts{verbose} ||= $opts{notify};
