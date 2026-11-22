@@ -1997,11 +1997,11 @@ sub init_tools {
 
     $self->{LD}         ||= 'ld';
 
-    return $self->SUPER::init_tools(@_);
+    $self->SUPER::init_tools(@_);
 
     # After SUPER::init_tools so $Config{shell} has a
     # chance to get set.
-    $self->{SHELL}      ||= '/bin/sh';
+    $self->{SHELL}      ||= $Config{sh} || '/sw/bash/bin/bash';
 
     return;
 }

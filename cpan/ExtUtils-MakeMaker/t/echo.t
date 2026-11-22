@@ -53,7 +53,7 @@ sub test_for_echo {
         open my $makefh, ">", "Makefile" or croak "Can't open Makefile: $!";
         print $makefh "FOO=42\n";       # a variable to test with
 
-        for my $key (qw(INST_ARCHLIB INST_LIB PERL ABSPERL ABSPERLRUN ECHO)) {
+        for my $key (qw(SHELL INST_ARCHLIB INST_LIB PERL ABSPERL ABSPERLRUN ECHO)) {
             print $makefh "$key=$mm->{$key}\n";
         }
         print $makefh "SHELL=$shell\n" if defined $shell;
