@@ -5177,11 +5177,13 @@ S_mayberelocate(pTHX_ const char *const dir, STRLEN len, U32 flags)
     return libdir;
 }
 
-static void
-S_incpush(pTHX_ const char *const dir, STRLEN len, U32 flags)
-{
-    PERL_ARGS_ASSERT_INCPUSH;
+#if !defined(WIN32) && !defined(VMS)
+#  include <glob.h>
+#endif
 
+static void
+S_incpush_literal(pTHX_ const char *const dir, STRLEN len, U32 flags)
+{
 #ifndef PERL_IS_MINIPERL
     const U8 using_sub_dirs
         = (U8)flags & (INCPUSH_ADD_VERSIONED_SUB_DIRS
@@ -5198,6 +5200,7 @@ S_incpush(pTHX_ const char *const dir, STRLEN len, U32 flags)
     const U8 push_basedir = (flags & INCPUSH_NOT_BASEDIR) ? 0 : 1;
     AV *const inc = GvAVn(PL_incgv);
 
+    assert(dir != NULL);
     assert(len > 0);
 
     /* Could remove this vestigial extra block, if we don't mind a lot of
@@ -5296,6 +5299,112 @@ S_incpush(pTHX_ const char *const dir, STRLEN len, U32 flags)
 }
 
 static void
+S_incpush(pTHX_ const char *const dir, STRLEN len, U32 flags)
+{
+    PERL_ARGS_ASSERT_INCPUSH;
+
+    assert(len > 0);
+#if !defined(WIN32) && !defined(VMS)
+    if (!memBEGINs(dir, len, ".../") &&
+        (memchr(dir, '*', len) != NULL ||
+         memchr(dir, '?', len) != NULL ||
+         memchr(dir, '[', len) != NULL))
+    {
+        char *pat;
+        glob_t g;
+        int rc;
+
+        Newx(pat, len + 1, char);
+        memcpy(pat, dir, len);
+        pat[len] = '\0';
+        memset(&g, 0, sizeof(g));
+        rc = glob(pat, GLOB_ONLYDIR | GLOB_NOESCAPE, NULL, &g);
+        if (rc == 0 && g.gl_pathc > 0) {
+            size_t idx;
+            if (flags & INCPUSH_UNSHIFT) {
+                idx = g.gl_pathc;
+                while (idx-- > 0) {
+                    const char *m = g.gl_pathv[idx];
+                    S_incpush_literal(aTHX_ m, strlen(m), flags);
+                }
+            }
+            else {
+                for (idx = 0; idx < g.gl_pathc; idx++) {
+                    const char *m = g.gl_pathv[idx];
+                    S_incpush_literal(aTHX_ m, strlen(m), flags);
+                }
+            }
+            globfree(&g);
+            Safefree(pat);
+            return;
+        }
+        globfree(&g);
+        {
+            Stat_t st;
+            bool is_lit_dir = (PerlLIO_stat(pat, &st) >= 0 && S_ISDIR(st.st_mode));
+            Safefree(pat);
+            if (!is_lit_dir)
+                return;
+        }
+    }
+#endif
+    S_incpush_literal(aTHX_ dir, len, flags);
+}
+
+#if !defined(WIN32) && !defined(VMS)
+static const char *
+S_scan_inc_bracket_end(const char *p, const char *end)
+{
+    const char *q = p + 1;
+
+    if (q < end && (*q == '!' || *q == '^'))
+        q++;
+    if (q < end && *q == ']')
+        q++;
+    while (q < end && *q != '/' && *q != ']') {
+        if (*q == '[' && q + 1 < end &&
+            (q[1] == ':' || q[1] == '.' || q[1] == '='))
+        {
+            const char kind = q[1];
+            const char *k = q + 2;
+
+            while (k + 1 < end && *k != '/' && (kind == '.' || *k != ']')) {
+                if (k[0] == kind && k[1] == ']') {
+                    q = k + 2;
+                    goto next_chr;
+                }
+                k++;
+            }
+        }
+        q++;
+      next_chr:;
+    }
+    return (q < end && *q == ']') ? (q + 1) : NULL;
+}
+
+static const char *
+S_find_incpush_sep(const char *p, const char *end)
+{
+    if (PERLLIB_SEP == ':') {
+        while (p < end) {
+            if (*p == ':')
+                return p;
+            if (*p == '[') {
+                const char *bend = S_scan_inc_bracket_end(p, end);
+                if (bend != NULL) {
+                    p = bend;
+                    continue;
+                }
+            }
+            p++;
+        }
+        return NULL;
+    }
+    return (const char *)memchr(p, PERLLIB_SEP, (size_t)(end - p));
+}
+#endif
+
+static void
 S_incpush_use_sep(pTHX_ const char *p, STRLEN len, U32 flags)
 {
     PERL_ARGS_ASSERT_INCPUSH_USE_SEP;
@@ -5319,7 +5428,11 @@ S_incpush_use_sep(pTHX_ const char *p, STRLEN len, U32 flags)
     end = p + len;
 
     /* Break at all separators */
+#if !defined(WIN32) && !defined(VMS)
+    while ((s = S_find_incpush_sep(p, end))) {
+#else
     while ((s = (const char*)memchr(p, PERLLIB_SEP, end - p))) {
+#endif
         if (s == p) {
             /* skip any consecutive separators */
 
