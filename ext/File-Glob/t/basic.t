@@ -10,7 +10,7 @@ BEGIN {
     }
 }
 use strict;
-use Test::More tests => 56;
+use Test::More tests => 77;
 BEGIN {use_ok('File::Glob', ':glob')};
 use Cwd ();
 
@@ -329,3 +329,90 @@ for (qw[
 is <a b>, 'a b', '<a b> under :bsd_glob';
 is <"a" "b">, '"a" "b"', '<"a" "b"> under :bsd_glob';
 is_deeply [<a b>], [q<a b>], '<> in list context under :bsd_glob';
+
+package fluffy_glob_tests;
+use Test::More;
+use File::Temp qw(tempdir);
+
+{
+    my $td = tempdir(CLEANUP => 1);
+    mkdir "$td/perl" or die $!;
+    mkdir "$td/perl/bin" or die $!;
+    mkdir "$td/other" or die $!;
+    mkdir "$td/other/bin" or die $!;
+    open my $fh, '>', "$td/perl/bin/perl" or die $!;
+    close $fh;
+
+    my @hit = CORE::glob("$td/*/bin/perl");
+    is_deeply(\@hit, ["$td/perl/bin/perl"], 'wildcard <$td/*/bin/perl> resolves match');
+
+    my @miss_wild = CORE::glob("$td/*/nonexistent");
+    is_deeply(\@miss_wild, [], 'unmatched wildcard <$td/*/nonexistent> returns () under GLOB_NOMAGIC');
+
+    my @miss_lit = CORE::glob("$td/nonexistent_literal");
+    is_deeply(\@miss_lit, ["$td/nonexistent_literal"], 'unmatched literal returns itself under GLOB_NOMAGIC');
+
+    for my $f ('^', '!', ']', 'a', 'b') {
+        open my $bf, '>', "$td/$f" or die $!;
+        close $bf;
+    }
+    my @caret = sort(CORE::glob("$td/[^a]"));
+    is_deeply(\@caret, ["$td/^", "$td/a"], '[^a] is a positive char class matching ^ and a');
+
+    my @esc_caret = sort(CORE::glob("$td/[\\^a]"));
+    is_deeply(\@esc_caret, ["$td/^", "$td/a"], '[\^a] matches literal ^ and a');
+
+    my @esc_bang = sort(CORE::glob("$td/[\\!a]"));
+    is_deeply(\@esc_bang, ["$td/!", "$td/a"], '[\!a] matches literal ! and a instead of negating');
+
+    my @esc_rbrack = sort(CORE::glob("$td/[a\\]b]"));
+    is_deeply(\@esc_rbrack, ["$td/]", "$td/a", "$td/b"], '[a\]b] matches literal ], a, and b');
+
+    my @bang = sort(CORE::glob("$td/[!^!\\]a]"));
+    is_deeply(\@bang, ["$td/b"], '[!^!\]a] negates ^, !, ], and a');
+}
+
+SKIP: {
+    skip 'POSIX-only bracket tests', 13 if $^O eq 'MSWin32' || $^O eq 'VMS';
+    my $td = tempdir(CLEANUP => 1);
+    for my $f ('a', 'b', '-', '\\', 'a]', 'x[', 'b\\') {
+        open my $bf, '>', "$td/$f" or die $!;
+        close $bf;
+    }
+    mkdir "$td/[a" or die $!;
+    open my $nf, '>', "$td/[a/b]" or die $!;
+    close $nf;
+
+    is_deeply([sort(CORE::glob("$td/[[:alpha:]]"))], ["$td/a]"],
+              '[[:alpha:]] is the set [:alph followed by ], not a POSIX class');
+    is_deeply([sort(CORE::glob("$td/[[.a.]]"))], ["$td/a]"],
+              '[[.a.]] is the set [.a followed by ], not a collating symbol');
+    is_deeply([sort(CORE::glob("$td/[[=a=]]"))], ["$td/a]"],
+              '[[=a=]] is the set [=a followed by ], not an equivalence class');
+    is_deeply([sort(CORE::glob("$td/[a\\-b]"))], ["$td/-", "$td/a", "$td/b"],
+              '[a\-b] matches a literal -, not the range a-b');
+    is_deeply([sort(CORE::glob("$td/[\\\\a]"))], ["$td/\\", "$td/a"],
+              '[\\\\a] matches a literal backslash and a');
+    is_deeply([CORE::glob("$td/[a/b]")], ["$td/[a/b]"],
+              'a [ closed only in a later path component is literal');
+    is_deeply([CORE::glob("$td/x[")], ["$td/x["],
+              'a [ at the end of the pattern is literal');
+    is_deeply([CORE::glob("$td/x[ab")], ["$td/x[ab"],
+              'a [ never closed is literal');
+    is_deeply([File::Glob::bsd_glob("$td/\\*", 0)], ["$td/\\"],
+              'without GLOB_QUOTE a backslash is an ordinary character');
+    is_deeply([File::Glob::bsd_glob("$td/b\\", File::Glob::GLOB_QUOTE())], ["$td/b\\"],
+              'with GLOB_QUOTE a trailing backslash is literal');
+    is_deeply([File::Glob::bsd_glob("$td/a**", 0)], ["$td/a", "$td/a]"],
+              'a run of * matches as one *');
+
+    SKIP: {
+        skip 'running as root', 2 if not $>;
+        mkdir "$td/noperm", 0 or die $!;
+        my @r = File::Glob::bsd_glob("{$td/noperm/*,$td/a}",
+                                     File::Glob::GLOB_BRACE() | File::Glob::GLOB_ERR());
+        isnt(File::Glob::GLOB_ERROR(), 0, 'an unreadable directory under GLOB_ERR sets GLOB_ERROR');
+        is_deeply(\@r, [], 'an error in one brace alternative stops the expansion');
+        rmdir "$td/noperm";
+    }
+}
