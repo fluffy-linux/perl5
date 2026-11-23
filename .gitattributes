@@ -1,4 +1,4 @@
-.git_patch export-subst
+.git_patch export-ignore
 Porting/Glossary linguist-generated
 charclass_invlists.inc linguist-generated
 ebcdic_tables.h linguist-generated
